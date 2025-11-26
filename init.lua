@@ -3,6 +3,7 @@
 local core = require "core"
 local DocView = require "core.docview"
 local Doc = require "core.doc"
+local RootView = require "core.rootview"
 local command = require "core.command"
 local View = require "core.view"
 local syntax = require "core.syntax"
@@ -18,22 +19,53 @@ local Jupyter = {}
 
 local JupyterView = View:extend()
 
-Jupyter.JupyterView = JupyterView
+Jupyter.view = JupyterView
 
 local Block = DocView:extend()
 function Block:draw_scrollbar() return end
 function Block:get_scrollable_size() return self.size.y end
 
+local SyntaxDoc = Doc:extend()
+function SyntaxDoc:new(block, syntax_extension, ...)
+	self.block = block
+	self.syntax = syntax.get(syntax_extension)
+	SyntaxDoc.super.new(self, ...)
+end
+
+function SyntaxDoc:reset_syntax() end
+function Doc:save(...)
+	return self.block.jupyter:save(...)
+end
+
 config.plugins.jupyter = common.merge({
-  debug = false,
+  debug = true,
   python = { "python3" },
   kernel_timeout = 5,
   matplotlib_inline = true,
-  kernel_path = USERDIR .. PATHSEP .. "plugins" .. PATHSEP ..  "jupyter" .. PATHSEP .. "kernel.py"
+  kernel_path = USERDIR .. PATHSEP .. "plugins" .. PATHSEP ..  "jupyter" .. PATHSEP .. "kernel.py",
+  output_colors = {
+		[0] = style.syntax["normal"],
+		[30] = { 0, 0, 0 },
+		[31] = { 170, 0, 0 },
+		[32] = { 0, 170, 0 },
+		[33] = { 170, 85, 0 },
+		[34] = { 0, 0, 170 },
+		[35] = { 170, 0, 170 },
+		[36] = { 0, 170, 170 },
+		[37] = { 170, 170, 170 },
+		[90] = { 85, 85, 85 },
+		[91] = { 255, 85, 85 },
+		[92] = { 85, 255, 85 },
+		[93] = { 255, 255, 85 },
+		[94] = { 85, 85, 255 },
+		[95] = { 255, 85, 255 },
+		[96] = { 85, 255, 255 },
+		[97] = { 255, 255, 255 }
+	}
 }, config.plugins.jupyter)
 
 function Block:get_height()
-  return #self.doc.lines * self:get_line_height() + style.padding.y * 2
+  return #self.doc.lines * self:get_line_height()
 end
 
 local OutputView = Block:extend()
@@ -42,37 +74,73 @@ local MarkdownBlock = Block:extend()
 function OutputView:new()
   OutputView.super.new(self, Doc())
   self.read_only = true
+  self.line_ending_colors = {}
 end
 function OutputView:draw_line_gutter() end
+
+local function parse_256color_code(code)
+	if code < 8 then
+		return config.plugins.jupyter.output_colors[30 + code]
+	elseif code < 16 then
+		return config.plugins.jupyter.output_colors[90 + code]
+	elseif code >= 232 then
+		local num = (code - 232) * 16
+		return { num, num, num }
+	else
+		local num = (code - 16)
+		return { (num % 6), math.floor(num / 6) % 6, math.floor(num / 36) }
+	end
+end
+
+function OutputView:tokenize(line)
+	local tokens = {}
+	local offset = 1
+	local text = self.doc.lines[line]
+	local len = text:ulen() or #text
+	local fgcolor = self.line_ending_colors[line - 1] and self.line_ending_colors[line - 1][1] or config.plugins.jupyter.output_colors[0]
+	local bgcolor = self.line_ending_colors[line - 1] and self.line_ending_colors[line - 1][2]
+	while offset < len do
+		local s, e, code = text:find("\x1B%[([^m]+)m", offset)
+		if not s then break end
+		local codes = {}
+		for num in code:gmatch("([^;]+)") do table.insert(codes, tonumber(num)) end
+		common.push_token(tokens, "doc", line, offset, s - 1, { color = fgcolor, background = bgcolor })
+		while #codes > 0 do
+			if codes[1] == 38 and code[2] == 5 then
+				fgcolor = parse_256color_code(codes[3])
+				table.remove(codes, 1)
+				table.remove(codes, 1)
+				table.remove(codes, 1)
+			elseif codes[1] == 48 and code[2] == 5 then
+				bgcolor = parse_256color_code(codes[3])
+				table.remove(codes, 1)
+				table.remove(codes, 1)
+				table.remove(codes, 1)
+			elseif (codes[1] >= 40 and codes[1] <= 49) or (codes[1] >= 100 and codes[1] <= 109) then
+				bgcolor = config.plugins.jupyter.output_colors[math.floor(codes[1] - 10)]
+				table.remove(codes, 1)
+			else
+				fgcolor = config.plugins.jupyter.output_colors[math.floor(codes[1])] or config.plugins.jupyter.output_colors[0]
+				table.remove(codes, 1)
+			end
+		end
+		offset = e + 1
+	end
+	common.push_token(tokens, "doc", line, offset, len, { color = fgcolor, background = bgcolor })
+	self.line_ending_colors[line] = { fgcolor, bgcolor } 
+	return tokens
+end
 
 local CodeBlock = Block:extend()
 
 function CodeBlock:new(text)
-  CodeBlock.super.new(self, Doc())
+  CodeBlock.super.new(self, SyntaxDoc(self, ".py"))
   if text then
     self.doc:insert(1, 1, text)
   end
   self.run_order = nil
   self.doc:reset_syntax()
-end
-
--- This should probably be changed to DocView.
-local old_reset_syntax = Doc.reset_syntax
-function Doc:reset_syntax(...)
-  old_reset_syntax(self, ...)
-  for i, listener in ipairs(self.listeners) do
-    if listener:extends(CodeBlock) then
-      self.syntax = syntax.get(".py")
-      return
-    elseif listener:extends(MarkdownBlock) then
-      self.syntax = syntax.get(".md")
-      return
-    end
-  end
-end
-
-function CodeBlock:draw()
-  CodeBlock.super.draw(self)
+  self.id = string.format("%08x", math.random(0, 2 ^ 32))
 end
 
 -- function Block:get_virtual_line_offset(...)
@@ -84,7 +152,7 @@ end
 function CodeBlock:get_gutter_width() return style.code_font:get_width(string.format("[%s]", self.run_order or "")) + style.padding.x * 2 end
 function CodeBlock:draw_line_gutter(vline) 
   if vline == 1 then
-    common.draw_text(style.code_font, style.text, string.format("[%s]", self.run_order and self.run_order or ""), "left", self.position.x + style.padding.x, self.position.y + style.padding.y, 0, self:get_line_height())
+    common.draw_text(style.code_font, style.text, string.format("[%s]", self.run_order and self.run_order or ""), "left", self.position.x + style.padding.x, self.position.y, 0, self:get_line_height())
   end
 end
 
@@ -171,11 +239,12 @@ end
 
 
 function MarkdownBlock:new(text)
-  MarkdownBlock.super.new(self, Doc())
+  MarkdownBlock.super.new(self, SyntaxDoc(self, ".md"))
   if text then
     self.doc:insert(1, 1, text)
   end
   self.doc:reset_syntax()
+  self.id = string.format("%08x", math.random(0, 2 ^ 32))
 end
 function MarkdownBlock:get_gutter_width() return style.padding.x * 2 end
 function MarkdownBlock:draw_line_gutter() end
@@ -203,10 +272,98 @@ function JupyterView:new()
   JupyterView.super.new(self)
   self.blocks = {}
   self.path = nil
+  self.scrollable = true
   self.kernel = nil
   self.total_run = 0
   self.active_view = nil
+  self.abs_filename = nil
   self.run_queue = {}
+end
+
+function JupyterView:get_scrollable_size() 
+	local total = style.padding.y
+	for _, block in ipairs(self.blocks) do
+		total = total + block.size.y + style.padding.y * 3
+		for _, output in ipairs(block.output_blocks or {}) do
+			total = total + output.size.y + style.padding.y
+		end
+	end
+	return total
+end
+
+function JupyterView:save(filename, abs_filename)
+	if not filename then
+		filename = common.basename(self.abs_filename)
+		abs_filename = self.abs_filename
+	end
+	local t = { 
+		cells = {}, 
+		metadata = { 
+			kernelspec = { display_name = "Python 3", langauge = "python", name = "python3" },
+			language_info = { 
+				codemirror_mode = { name = "ipython", version = 3 },
+				file_extension = ".py",
+				mimetype = "text/x-python",
+				name = "python",
+				nbconvert_exporter = "python",
+				pygments_lexer = "ipython3",
+				version = Jupyter.version
+			},	
+		},
+		nbformat = 4,
+		nbformat_minor = 5 
+	}
+	for i, block in ipairs(self.blocks) do
+		local lines = {}
+		table.move(block.doc.lines, 1, #block.doc.lines, 1, lines)
+		lines[#lines] = lines[#lines]:gsub("\n","")
+		if block:is(MarkdownBlock) then
+			table.insert(t.cells, { cell_type = "markdown", id = block.id, metadata = {}, source = lines })
+		elseif block:is(CodeBlock) then
+			table.insert(t.cells, { cell_type = "code", execution_count = json.null, id = block.id, metadata = {}, source = lines, outputs = json.empty_array })
+		end
+	end
+	assert(io.open(abs_filename, "wb")):write(json.encode(t)):close()
+	self.abs_filename = abs_filename
+end
+
+local core_open_doc = core.open_doc
+function core.open_doc(abs_path, ...)
+	if abs_path:find("%.ipynb$") then
+		local jv = JupyterView()
+		jv:load(abs_path)
+		return jv
+	end
+	return core_open_doc(abs_path, ...)
+end
+
+local root_open_doc = RootView.open_dic
+function RootView:open_doc(doc, ...)
+	if doc:is(JupyterView) then
+		local node = self:get_active_node_default()
+		node:add_view(doc)
+		return doc
+	end
+	return root_open_doc(self, doc, ...)
+end
+
+function JupyterView:load(abs_filename)
+	local t = json.decode(io.open(abs_filename, "rb"):read("*all"))
+	if t.metadata and t.metadata.kernelspec.language ~= "python" then
+		core.warn("Jupyter: Cannot interpret any other languages than Python.")
+	end
+	self.abs_filename = abs_filename
+	for _, cell in ipairs(t.cells or {}) do
+		local block
+		if cell.cell_type == "markdown" then
+			block = self:add_block(MarkdownBlock(table.concat(cell.source, "")))
+		elseif cell.cell_type == "code" then
+			block = self:add_block(CodeBlock(table.concat(cell.source, "")))
+		end
+		if block then
+			block.id = cell.id
+		end
+	end
 end
 
 function JupyterView:run(block)
@@ -216,12 +373,7 @@ function JupyterView:run(block)
   if not self.kernel then
     self:restart()
   end
-  local frame = json.encode({ action = "execute", code = block.doc:get_text(1, 1, math.huge, math.huge) }) 
-  if config.plugins.jupyter.debug then print(">", frame) end
-  self.kernel.stdin:write(frame .. "\n")
-  frame = self.kernel.stdout:read("*line")
-  if config.plugins.jupyter.debug then print("<", frame) end
-  frame = json.decode(frame)
+  local frame = self:execute(block.doc:get_text(1, 1, math.huge, math.huge))
   if frame.status == "ok" then
     local outputs = {}
     for _, output in ipairs(frame.outputs) do
@@ -242,11 +394,11 @@ function JupyterView:run(block)
       end
     end
   elseif frame.status == "error" then
-    local outputs = { frame.evalue .. "\n" }
+    local outputs = { "\x1B[31m" .. frame.evalue .. "\n" }
     for _, output in ipairs(frame.outputs) do
       if output.type == "error" and output.traceback then
         for i, level in ipairs(output.traceback) do
-          table.insert(outputs, level:gsub("%c%[.-m", "") .. "\n")
+          table.insert(outputs, level .. "\n")
         end
       end
     end
@@ -261,15 +413,26 @@ end
 function JupyterView:draw()
   JupyterView.super.draw(self)
   self:draw_background(style.background3)
-  local x = self.position.x + style.padding.x
-  local y = self.position.y + style.padding.y
+  local ox, oy = self:get_content_offset()
+  local x = ox + style.padding.x
+  local y = oy + style.padding.y
   for i, block in ipairs(self.blocks) do
+		y = y + style.padding.y
     block.position.x = x
     block.position.y = y
     block.size.x = self.size.x - style.padding.x * 2
     block.size.y = block:get_height()
-    block:draw()
-    y = y + block:get_height() + style.padding.y
+    if block.position.y + block.size.y >= self.position.y and block.position.y < self.position.y + self.size.y then
+			renderer.draw_rect(block.position.x, block.position.y - style.padding.y, block.size.x, style.padding.y, style.background)
+			block:draw()
+			renderer.draw_rect(block.position.x, block.position.y + block.size.y, block.size.x, style.padding.y, style.background)
+			if block == self.active_view then
+				renderer.draw_rect(block.position.x, block.position.y - style.padding.y, 1, block.size.y + style.padding.y * 2, style.caret)
+			elseif block == self.hovering_block then
+				renderer.draw_rect(block.position.x, block.position.y - style.padding.y, 1, block.size.y + style.padding.y * 2, style.dim)
+			end
+		end
+    y = y + block:get_height() + style.padding.y * 2
     if block.output_blocks and #block.output_blocks > 0 then
       for _, output_block in ipairs(block.output_blocks) do
         output_block.position.x = x
@@ -278,21 +441,36 @@ function JupyterView:draw()
           output_block.size.x = self.size.x - style.padding.x * 2
           output_block.size.y = output_block:get_height()
         end
-        output_block:draw()
+        if output_block.position.y + output_block.size.y >= self.position.y and output_block.position.y < self.position.y + self.size.y then
+					output_block:draw()
+				end
         y = y + output_block:get_height() + style.padding.y
       end
     end
   end
 end
 
+function JupyterView:update()
+  JupyterView.super.update(self)
+  for i,v in ipairs(self.blocks) do
+    v:update()
+  end
+end
+
+
 function JupyterView:get_name()
-  return string.format("Jupyter Notebook - %s", self.path or "New File")
+	if self.abs_filename then
+		return string.format("Jupyter Notebook - %s", common.basename(self.abs_filename))
+	else
+		return string.format("Jupyter Notebook - New File")
+	end
 end
 
 function JupyterView:add_block(block, index)
   if not index then index = #self.blocks + 1 end
   table.insert(self.blocks, index, block)
   block.jupyter = self
+  block.doc.filename = self.abs_filename
   core.redraw = true
   return block
 end
@@ -318,22 +496,28 @@ function JupyterView:set_active_view(view)
   end
 end
 
-function JupyterView:update()
-  JupyterView.super.update(self)
-  for i,v in ipairs(self.blocks) do
-    v:update()
-  end
-end
-
-local function create_kernel()
+local function create_kernel(wd)
   assert(system.get_file_info(config.plugins.jupyter.kernel_path), string.format("can't find kernel at %s for Jupyter. Please adjust config.plugins.jupyter.kernel_path.", config.plugins.jupyter.kernel_path))
   local t = common.merge(config.plugins.jupyter.python, {})
   table.insert(t, config.plugins.jupyter.kernel_path)
+  table.insert(t, wd)
   return process.start(t)
 end
 
+function JupyterView:execute(code)
+	local frame = json.encode({ action = "execute", code = code })
+	if config.plugins.jupyter.debug then
+		print(">", frame)
+	end
+	self.kernel.stdin:write(frame .. "\n")
+	local output = self.kernel.stdout:read("*line")
+	if config.plugins.jupyter.debug then
+		print("<", output:gsub("%c", ""):gsub("\\n", "\n"))
+	end
+	return json.decode(output)
+end
+
 function JupyterView:restart()
-  local path = USERDIR .. PATHSEP .. "plugins" .. PATHSEP .. "jupyter" .. PATHSEP .. "kernel.py"
   if self.kernel then
     core.log("Shutting down Jupyter kernel...")
     self.kernel.stdin:write(json.encode({ action = "shutdown" }) .. "\n")
@@ -343,23 +527,21 @@ function JupyterView:restart()
       core.log("Jupyter kernel unable to shutdown successfully.")
     end
   end
-  self.kernel = create_kernel()
+  self.kernel = create_kernel(self.abs_filename)
   if config.plugins.jupyter.matplotlib_inline then
-    local frame = json.encode({ action = "execute", code = [[
+    self:execute([[
 import matplotlib
 from IPython import get_ipython
 ip = get_ipython()
 ip.run_line_magic('matplotlib', 'inline')
-]] })
-    if config.plugins.jupyter.debug then
-      print(">", frame)
-    end
-    self.kernel.stdin:write(frame .. "\n")
-    local output = self.kernel.stdout:read("*line")
-    if config.plugins.jupyter.debug then
-      print("<", output:gsub("%c%[.-m", ""):gsub("\\n", "\n"))
-    end
+]])
   end
+  if self.abs_filename then
+		self:execute([[
+import os
+os.chdir("""]] .. common.dirname(self.abs_filename):gsub('"""', '') .. [[""")
+]])
+	end
   self.total_run = 0
   core.log("Jupyter kernel started.")
 end
@@ -411,8 +593,10 @@ function JupyterView:on_mouse_released(button, ...)
     self.holding_left = false
   end
   if self.hovering_block then
+		self.cursor = self.hovering_block.cursor
     return self.hovering_block:on_mouse_released(button, ...)
   end
+	self.cursor = "arrow"
   return JupyterView.super.on_mouse_released(self, button, ...)
 end
 
@@ -432,10 +616,6 @@ function JupyterView:on_mouse_moved(x, y)
     return self.hovering_block:on_mouse_moved(x, y)
   end
   return JupyterView.super.on_mouse_moved(self, x, y)
-end
-
-function JupyterView:on_mouse_wheel(x, y)
-  return 
 end
 
 local function pred(view)
@@ -460,6 +640,11 @@ core.add_thread(function()
       core.error("Jupyter: You don't seem to have python installed at %s (exit: %s), please install python or configure config.plugins.jupyter.python: %s", config.plugins.jupyter.python[1], status or "timeout", test.stderr:read("*all") or "unknown error")
       return
     end
+    Jupyter.python_version = test.stdout:read("*line"):match("Python (.*)")
+    if not Jupyter.python_version then 
+			core.warn("Jupyter: Can't detect python version.")
+    end
+    
     -- check to see if we can boot a python kernel, and it has ipykernel installed
     local kernel = create_kernel()
     kernel.stdin:write(json.encode({ action = "shutdown" }) .. "\n")
@@ -473,13 +658,15 @@ core.add_thread(function()
       return
     end
 
-    core.log_quiet("Jupyter kernel successfully initialized.")
+    core.log_quiet("Jupyter kernel with python version %s successfully initialized.", Jupyter.python_version or "unknown")
     Jupyter.initialized = true
     
     command.add(nil, {
       ["jupyter:new-notebook"] = function(rv)
         local node = rv:get_active_node_default()
-        node:add_view(JupyterView())
+        local jv = JupyterView()
+        jv:queue(function() jv:restart() end)
+        node:add_view(jv)
       end
     })
 

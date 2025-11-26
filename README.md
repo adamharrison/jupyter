@@ -10,15 +10,11 @@ Requires the new canvas API in Lite XL 3.0.
 
 ### TODO
 
-1. Allow you to scroll the document correctly vertically.
-2. Adjust some clicking issues with the code blocks.
-3. Create a floating toolbar.
-4. Dump compressed images instead of uncompressed from stdout.
-5. Render markdown
-6. Save the file as a `.ipynb`.
-7. Open `.ipynb` files.
-8. Optimize logic and actually put the `draw` stuff in the right place.
-9. Decode base64 better.
+1. Create a floating toolbar.
+2. Dump compressed images instead of uncompressed from stdout.
+3. Render markdown
+4. Optimize logic and actually put the `draw` stuff in the right place.
+5. Decode base64 better.
 
 ### Preview
 
