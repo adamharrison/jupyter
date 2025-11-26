@@ -1,0 +1,13 @@
+{
+  "addons": [{
+    "id": "jupyter",
+    "mod_version": "4",
+    "type": "plugin",
+    "version": "0.1",
+    "path": ".",
+    "description": "A plugin that allows for the running and display of jupyter notebooks.",
+    "dependencies": {
+      "json": {}
+    }
+  }]
+}
