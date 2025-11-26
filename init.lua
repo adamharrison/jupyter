@@ -25,7 +25,7 @@ function Block:draw_scrollbar() return end
 function Block:get_scrollable_size() return self.size.y end
 
 config.plugins.jupyter = common.merge({
-  debug = true,
+  debug = false,
   python = { "python3" },
   kernel_timeout = 5,
   matplotlib_inline = true,
@@ -351,12 +351,12 @@ from IPython import get_ipython
 ip = get_ipython()
 ip.run_line_magic('matplotlib', 'inline')
 ]] })
-    if config.plugins.debug then
+    if config.plugins.jupyter.debug then
       print(">", frame)
     end
     self.kernel.stdin:write(frame .. "\n")
     local output = self.kernel.stdout:read("*line")
-    if config.plugins.debug then
+    if config.plugins.jupyter.debug then
       print("<", output:gsub("%c%[.-m", ""):gsub("\\n", "\n"))
     end
   end
