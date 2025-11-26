@@ -539,11 +539,6 @@ core.add_thread(function()
     ['escape'] = "jupyter:deselect",
     ['f8'] = "jupyter:run-block"
   }
-
-  command.perform("jupyter:new-notebook")
-  command.perform("jupyter:add-markdown-block", core.root_view, { text = "# Heading 1\nTest Markdown\nTest Line 2\nTest Line 3" })
-  command.perform("jupyter:add-code-block", core.root_view, { text = "import pandas as pd\nimport matplotlib.pyplot as plt\nplt.figure()\nplt.plot([1, 2], [3, 4])\nplt.show()" })
-  command.perform("jupyter:run-all")
 end)
 
 return Jupyter
