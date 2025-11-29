@@ -33,7 +33,7 @@ function SyntaxDoc:new(block, syntax_extension, ...)
 end
 
 function SyntaxDoc:reset_syntax() end
-function Doc:save(...)
+function SyntaxDoc:save(...)
 	return self.block.jupyter:save(...)
 end
 
@@ -274,7 +274,6 @@ function JupyterView:new()
   self.path = nil
   self.scrollable = true
   self.kernel = nil
-  self.total_run = 0
   self.active_view = nil
   self.abs_filename = nil
   self.run_queue = {}
@@ -337,11 +336,10 @@ function core.open_doc(abs_path, ...)
 	return core_open_doc(abs_path, ...)
 end
 
-local root_open_doc = RootView.open_dic
+local root_open_doc = RootView.open_doc
 function RootView:open_doc(doc, ...)
-	if doc:is(JupyterView) then
-		local node = self:get_active_node_default()
-		node:add_view(doc)
+	if doc.is and doc:is(JupyterView) then
+		self:get_active_node_default():add_view(doc)
 		return doc
 	end
 	return root_open_doc(self, doc, ...)
@@ -349,8 +347,8 @@ end
 
 function JupyterView:load(abs_filename)
 	local t = json.decode(io.open(abs_filename, "rb"):read("*all"))
-	if t.metadata and t.metadata.kernelspec.language ~= "python" then
-		core.warn("Jupyter: Cannot interpret any other languages than Python.")
+	if t.metadata and t.metadata.kernelspec.language and t.metadata.kernelspec.language ~= "python" then
+		core.warn("Jupyter: Cannot interpret %s, cannot interppret any other languages than Python.", t.metadata.kernelspec.language)
 	end
 	self.abs_filename = abs_filename
 	for _, cell in ipairs(t.cells or {}) do
@@ -374,7 +372,7 @@ function JupyterView:run(block)
     self:restart()
   end
   local frame = self:execute(block.doc:get_text(1, 1, math.huge, math.huge))
-  if frame.status == "ok" then
+  if frame.outputs then
     local outputs = {}
     for _, output in ipairs(frame.outputs) do
       if output.type == "stream" and output.name == "stdout" then
@@ -385,7 +383,7 @@ function JupyterView:run(block)
         block.output_blocks[#block.output_blocks].doc:insert(math.huge,math.huge, output.text)
       elseif output.type == "display_data" and output.data["image/raw"] then
         table.insert(block.output_blocks, Figure(base64.decode(output.data["image/raw"]), output.metadata["width"], output.metadata["height"]))
-      elseif output.type == "result" and output.data["text/plain"] then
+      elseif output.type == "execute_result" and output.data["text/plain"] then
         if #block.output_blocks == 0 or block.output_blocks[#block.output_blocks]:is(Figure) then
           table.insert(block.output_blocks, OutputView(Doc()))
           block.output_blocks[#block.output_blocks].doc:remove(1, 1, math.huge, math.huge)
@@ -393,20 +391,15 @@ function JupyterView:run(block)
         block.output_blocks[#block.output_blocks].doc:insert(math.huge,math.huge, output.data["text/plain"])
       end
     end
-  elseif frame.status == "error" then
-    local outputs = { "\x1B[31m" .. frame.evalue .. "\n" }
-    for _, output in ipairs(frame.outputs) do
-      if output.type == "error" and output.traceback then
-        for i, level in ipairs(output.traceback) do
-          table.insert(outputs, level .. "\n")
-        end
-      end
-    end
+		block.run_order = frame.execution_count
+  elseif frame.error then
+    local outputs = { "\x1B[31m" .. frame.error .. "\n" }
+		for i, level in ipairs(frame.traceback) do
+			table.insert(outputs, level .. "\n")
+		end
     table.insert(block.output_blocks, OutputView(Doc()))
     block.output_blocks[#block.output_blocks].doc:insert(1, 1, table.concat(outputs, ""))
   end
-  self.total_run = self.total_run + 1
-  block.run_order = self.total_run
   core.redraw = true
 end
 
@@ -457,6 +450,7 @@ function JupyterView:update()
   end
 end
 
+function Block:get_name(...) return self.jupyter:get_name(...) end
 
 function JupyterView:get_name()
 	if self.abs_filename then
@@ -504,15 +498,16 @@ local function create_kernel(wd)
   return process.start(t)
 end
 
-function JupyterView:execute(code)
-	local frame = json.encode({ action = "execute", code = code })
+function JupyterView:execute(code, options)
+	local frame = json.encode(common.merge({ code = code }, options or {}))
 	if config.plugins.jupyter.debug then
 		print(">", frame)
 	end
 	self.kernel.stdin:write(frame .. "\n")
 	local output = self.kernel.stdout:read("*line")
 	if config.plugins.jupyter.debug then
-		print("<", output:gsub("%c", ""):gsub("\\n", "\n"))
+		local stripped = output:gsub("%c", ""):gsub("\\n", "\n")
+		print("<", stripped)
 	end
 	return json.decode(output)
 end
@@ -532,17 +527,15 @@ function JupyterView:restart()
     self:execute([[
 import matplotlib
 from IPython import get_ipython
-ip = get_ipython()
-ip.run_line_magic('matplotlib', 'inline')
-]])
+get_ipython().run_line_magic('matplotlib', 'inline')
+]], { silent = true })
   end
   if self.abs_filename then
 		self:execute([[
 import os
 os.chdir("""]] .. common.dirname(self.abs_filename):gsub('"""', '') .. [[""")
-]])
+]], { silent = true })
 	end
-  self.total_run = 0
   core.log("Jupyter kernel started.")
 end
 
@@ -593,10 +586,8 @@ function JupyterView:on_mouse_released(button, ...)
     self.holding_left = false
   end
   if self.hovering_block then
-		self.cursor = self.hovering_block.cursor
     return self.hovering_block:on_mouse_released(button, ...)
   end
-	self.cursor = "arrow"
   return JupyterView.super.on_mouse_released(self, button, ...)
 end
 
@@ -613,8 +604,10 @@ function JupyterView:on_mouse_moved(x, y)
     self.hovering_block = self:get_block_overlapping_point(x, y)
   end
   if self.hovering_block then
+		self.cursor = self.hovering_block.cursor
     return self.hovering_block:on_mouse_moved(x, y)
   end
+	self.cursor = "arrow"
   return JupyterView.super.on_mouse_moved(self, x, y)
 end
 
@@ -647,9 +640,8 @@ core.add_thread(function()
     
     -- check to see if we can boot a python kernel, and it has ipykernel installed
     local kernel = create_kernel()
-    kernel.stdin:write(json.encode({ action = "shutdown" }) .. "\n")
+    kernel.stdin:close()
     local status, err = pcall(function()
-      local frame = kernel.stdout:read("*line", { timeout = config.plugins.jupyter.kernel_timeout })
       local status = kernel:wait()
       assert(status == 0, string.format("Jupyter: Unable to start an IPython kernel and matplotlib (exit: %s): %s. Please ensure you have ipykernel installed (pip install ipykernel matplotlib).", status or "timeout", test.stderr:read("*all") or "unknown error"))
     end)
@@ -720,6 +712,9 @@ core.add_thread(function()
         block.jupyter:remove_block(block)
       end
     })
+    command.perform("jupyter:new-notebook")
+    command.perform("jupyter:add-code-block", core.active_window().root_view, { text = "1 + 1" })
+    command.perform("jupyter:run-block", core.active_window().root_view)
   end)
 
   keymap.add {
