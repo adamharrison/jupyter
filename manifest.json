@@ -7,7 +7,8 @@
     "path": ".",
     "description": "A plugin that allows for the running and display of jupyter notebooks.",
     "dependencies": {
-      "json": {}
+      "json": {},
+      "image": {}
     }
   }]
 }

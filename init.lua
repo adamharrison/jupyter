@@ -14,6 +14,7 @@ local common = require "core.common"
 local keymap = require "core.keymap"
 local ime = require "core.ime"
 local json = require "libraries.json"
+local image = require "libraries.image"
 
 local Jupyter = {}
 
@@ -71,8 +72,9 @@ end
 local OutputView = Block:extend()
 local MarkdownBlock = Block:extend()
 
-function OutputView:new()
-  OutputView.super.new(self, Doc())
+function OutputView:new(jupyter, doc)
+  OutputView.super.new(self, doc or Doc())
+  self.jupyter = jupyter
   self.read_only = true
   self.line_ending_colors = {}
 end
@@ -138,7 +140,7 @@ function CodeBlock:new(text)
   if text then
     self.doc:insert(1, 1, text)
   end
-  self.run_order = nil
+  self.execution_count = nil
   self.doc:reset_syntax()
   self.id = string.format("%08x", math.random(0, 2 ^ 32))
 end
@@ -149,10 +151,10 @@ end
 -- end
 
 
-function CodeBlock:get_gutter_width() return style.code_font:get_width(string.format("[%s]", self.run_order or "")) + style.padding.x * 2 end
+function CodeBlock:get_gutter_width() return style.code_font:get_width(string.format("[%s]", self.execution_count or "")) + style.padding.x * 2 end
 function CodeBlock:draw_line_gutter(vline) 
   if vline == 1 then
-    common.draw_text(style.code_font, style.text, string.format("[%s]", self.run_order and self.run_order or ""), "left", self.position.x + style.padding.x, self.position.y, 0, self:get_line_height())
+    common.draw_text(style.code_font, style.text, string.format("[%s]", self.execution_count and self.execution_count or ""), "left", self.position.x + style.padding.x, self.position.y, 0, self:get_line_height())
   end
 end
 
@@ -189,6 +191,7 @@ end
 
 local char, concat = string.char, table.concat
 local DEFAULT_DECODER = base64.makedecoder()
+local DEFAULT_ENCODER = base64.makeencoder()
 
 function base64.decode( b64, decoder, usecaching )
 	decoder = decoder or DEFAULT_DECODER
@@ -237,6 +240,37 @@ function base64.decode( b64, decoder, usecaching )
 	return concat( t )
 end
 
+function base64.encode( str, encoder, usecaching )
+	encoder = encoder or DEFAULT_ENCODER
+	local t, k, n = {}, 1, #str
+	local lastn = n % 3
+	local cache = {}
+	for i = 1, n-lastn, 3 do
+		local a, b, c = str:byte( i, i+2 )
+		local v = a*0x10000 + b*0x100 + c
+		local s
+		if usecaching then
+			s = cache[v]
+			if not s then
+				s = char(encoder[extract(v,18,6)], encoder[extract(v,12,6)], encoder[extract(v,6,6)], encoder[extract(v,0,6)])
+				cache[v] = s
+			end
+		else
+			s = char(encoder[extract(v,18,6)], encoder[extract(v,12,6)], encoder[extract(v,6,6)], encoder[extract(v,0,6)])
+		end
+		t[k] = s
+		k = k + 1
+	end
+	if lastn == 2 then
+		local a, b = str:byte( n-1, n )
+		local v = a*0x10000 + b*0x100
+		t[k] = char(encoder[extract(v,18,6)], encoder[extract(v,12,6)], encoder[extract(v,6,6)], encoder[64])
+	elseif lastn == 1 then
+		local v = str:byte( n )*0x10000
+		t[k] = char(encoder[extract(v,18,6)], encoder[extract(v,12,6)], encoder[64], encoder[64])
+	end
+	return concat( t )
+end
 
 function MarkdownBlock:new(text)
   MarkdownBlock.super.new(self, SyntaxDoc(self, ".md"))
@@ -249,13 +283,15 @@ end
 function MarkdownBlock:get_gutter_width() return style.padding.x * 2 end
 function MarkdownBlock:draw_line_gutter() end
 
-local Figure = Object:extend()
+local Figure = View:extend()
 
-function Figure:new(bytes, width, height)
+function Figure:new(jupyter, image)
   Figure.super.new(self)
+  self.jupyter = jupyter
+  self.image = image
   self.position = { x = 0, y = 0 }
-  self.size = { x = width, y = height }
-  self.bytes = bytes
+  self.size = { x = image.width, y = image.height }
+  self.bytes = image:save()
   self.canvas = canvas.new(self.size.x, self.size.y)
   self.canvas:set_pixels(self.bytes, 0, 0, self.size.x, self.size.y)
 end
@@ -266,6 +302,16 @@ end
 
 function Figure:get_height()
   return self.size.y
+end
+
+function Figure:on_context_menu()
+	return { items = {
+		{ text = "Save Graph", command = "jupyter:save-graph" }
+	} }
+end
+
+function JupyterView:on_context_menu()	
+	return self.hovering_block and self.hovering_block:on_context_menu()
 end
 
 function JupyterView:new()
@@ -319,10 +365,20 @@ function JupyterView:save(filename, abs_filename)
 		if block:is(MarkdownBlock) then
 			table.insert(t.cells, { cell_type = "markdown", id = block.id, metadata = {}, source = lines })
 		elseif block:is(CodeBlock) then
-			table.insert(t.cells, { cell_type = "code", execution_count = json.null, id = block.id, metadata = {}, source = lines, outputs = json.empty_array })
+			local outputs = {}
+			for _, output_block in ipairs(block.output_blocks) do
+				table.insert(outputs, output_block.frame)
+			end
+			table.insert(t.cells, { cell_type = "code", execution_count = block.execution_count, id = block.id, metadata = {}, source = lines, outputs = #outputs > 0 and outputs or json.empty_array })
 		end
 	end
 	assert(io.open(abs_filename, "wb")):write(json.encode(t)):close()
+	for _, block in ipairs(self.blocks) do
+		if block.doc then
+			block.doc:clean()
+			block.doc.filename = filename
+		end
+	end
 	self.abs_filename = abs_filename
 end
 
@@ -345,6 +401,39 @@ function RootView:open_doc(doc, ...)
 	return root_open_doc(self, doc, ...)
 end
 
+function CodeBlock:setOutputs(outputs)
+	self.output_blocks = {}
+	for _, output in ipairs(outputs) do
+		if output.output_type == "stream" and output.name == "stdout" then
+			if #self.output_blocks == 0 or self.output_blocks[#self.output_blocks]:is(Figure) then
+				table.insert(self.output_blocks, OutputView(self.jupyter, Doc()))
+				self.output_blocks[#self.output_blocks].doc:remove(1, 1, math.huge, math.huge)
+			end
+			local text = output.text
+			if type(text) == 'table' then
+				text = table.concat(text, '')
+			end
+			self.output_blocks[#self.output_blocks].doc:insert(math.huge, math.huge, text)
+			self.output_blocks[#self.output_blocks].frame = output
+		elseif output.output_type == "display_data" and output.data["image/png"] then
+			table.insert(self.output_blocks, Figure(self, image.new(base64.decode(output.data["image/png"]))))
+			self.output_blocks[#self.output_blocks].frame = output
+		elseif output.output_type == "execute_result" and output.data["text/plain"] then
+			if #self.output_blocks == 0 or self.output_blocks[#self.output_blocks]:is(Figure) then
+				table.insert(self.output_blocks, OutputView(self.jupyter, Doc()))
+				self.output_blocks[#self.output_blocks].doc:remove(1, 1, math.huge, math.huge)
+			end
+			local plain = output.data["text/plain"]
+			if type(plain) == 'table' then
+				plain = table.concat(plain, "")
+			end
+			self.output_blocks[#self.output_blocks].doc:insert(math.huge, math.huge, plain)
+			self.output_blocks[#self.output_blocks].frame = output
+		end
+	end
+end
+
+
 function JupyterView:load(abs_filename)
 	local t = json.decode(io.open(abs_filename, "rb"):read("*all"))
 	if t.metadata and t.metadata.kernelspec.language and t.metadata.kernelspec.language ~= "python" then
@@ -357,6 +446,9 @@ function JupyterView:load(abs_filename)
 			block = self:add_block(MarkdownBlock(table.concat(cell.source, "")))
 		elseif cell.cell_type == "code" then
 			block = self:add_block(CodeBlock(table.concat(cell.source, "")))
+			if cell.outputs then
+				block:setOutputs(cell.outputs)
+			end
 		end
 		if block then
 			block.id = cell.id
@@ -365,39 +457,19 @@ function JupyterView:load(abs_filename)
 end
 
 function JupyterView:run(block)
-  if not block.output_block then
-    block.output_blocks = { }
-  end
   if not self.kernel then
     self:restart()
   end
   local frame = self:execute(block.doc:get_text(1, 1, math.huge, math.huge))
   if frame.outputs then
-    local outputs = {}
-    for _, output in ipairs(frame.outputs) do
-      if output.type == "stream" and output.name == "stdout" then
-        if #block.output_blocks == 0 or block.output_blocks[#block.output_blocks]:is(Figure) then
-          table.insert(block.output_blocks, OutputView(Doc()))
-          block.output_blocks[#block.output_blocks].doc:remove(1, 1, math.huge, math.huge)
-        end
-        block.output_blocks[#block.output_blocks].doc:insert(math.huge,math.huge, output.text)
-      elseif output.type == "display_data" and output.data["image/raw"] then
-        table.insert(block.output_blocks, Figure(base64.decode(output.data["image/raw"]), output.metadata["width"], output.metadata["height"]))
-      elseif output.type == "execute_result" and output.data["text/plain"] then
-        if #block.output_blocks == 0 or block.output_blocks[#block.output_blocks]:is(Figure) then
-          table.insert(block.output_blocks, OutputView(Doc()))
-          block.output_blocks[#block.output_blocks].doc:remove(1, 1, math.huge, math.huge)
-        end
-        block.output_blocks[#block.output_blocks].doc:insert(math.huge,math.huge, output.data["text/plain"])
-      end
-    end
-		block.run_order = frame.execution_count
+    block:setOutputs(frame.outputs)
+		block.execution_count = frame.execution_count
   elseif frame.error then
     local outputs = { "\x1B[31m" .. frame.error .. "\n" }
 		for i, level in ipairs(frame.traceback) do
 			table.insert(outputs, level .. "\n")
 		end
-    table.insert(block.output_blocks, OutputView(Doc()))
+		block.output_blocks = { OutputView(self, Doc()) }
     block.output_blocks[#block.output_blocks].doc:insert(1, 1, table.concat(outputs, ""))
   end
   core.redraw = true
@@ -452,11 +524,20 @@ end
 
 function Block:get_name(...) return self.jupyter:get_name(...) end
 
+function JupyterView:is_dirty()
+	for _, block in ipairs(self.blocks) do
+		if block.doc and block.doc:is_dirty() then
+			return true
+		end
+	end
+	return false
+end
+
 function JupyterView:get_name()
 	if self.abs_filename then
-		return string.format("Jupyter Notebook - %s", common.basename(self.abs_filename))
+		return string.format("Jupyter Notebook - %s%s", common.basename(self.abs_filename), self:is_dirty() and "*" or "")
 	else
-		return string.format("Jupyter Notebook - New File")
+		return string.format("Jupyter Notebook - unsaved*")
 	end
 end
 
@@ -550,7 +631,7 @@ end
 function JupyterView:clear()
   for _, block in ipairs(self.blocks) do
     block.output_blocks = {}
-    block.run_order = nil
+    block.execution_count = nil
   end
 end
 
@@ -596,6 +677,13 @@ function JupyterView:get_block_overlapping_point(x, y)
     if x >= block.position.x and x < block.position.x + block.size.x and y >= block.position.y and y < block.position.y + block.size.y then
       return block
     end
+    if block.output_blocks then
+			for _, output in ipairs(block.output_blocks) do
+				if x >= output.position.x and x < output.position.x + output.size.x and y >= output.position.y and y < output.position.y + output.size.y then
+					return output
+				end
+			end
+		end
   end  
 end
 
@@ -683,6 +771,23 @@ core.add_thread(function()
         jv:clear()
       end
     })
+    command.add(Figure, {
+			["jupyter:save-graph"] = function(figure)
+				figure.jupyter.root_view.command_view:enter("Save graph to", {
+					text = "graph.png",
+					submit = function(text)
+						core.try(function()
+							figure.image:save(text)
+							core.log("Successfully saved graph to %s.", text)
+						end)
+					end,
+					suggest = function (text)
+						return common.home_encode_list(common.path_suggest(common.home_expand(text)))
+					end
+				})
+
+			end
+		})
 
     command.add(MarkdownBlock, {
       ["jupyter:switch-to-code-block"] = function(block)
@@ -712,9 +817,6 @@ core.add_thread(function()
         block.jupyter:remove_block(block)
       end
     })
-    command.perform("jupyter:new-notebook")
-    command.perform("jupyter:add-code-block", core.active_window().root_view, { text = "1 + 1" })
-    command.perform("jupyter:run-block", core.active_window().root_view)
   end)
 
   keymap.add {

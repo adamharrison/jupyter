@@ -3,10 +3,6 @@
 import sys
 import json
 import traceback
-import base64
-import numpy as np
-import io
-from PIL import Image
 from ipykernel.inprocess.manager import InProcessKernelManager
 
 km = InProcessKernelManager()
@@ -26,15 +22,9 @@ try:
                 im = client.get_iopub_msg()
                 content = im["content"]
                 if content.get("execution_count"):
-                    res["execution_count"] = content.pop("execution_count")
+                    res["execution_count"] = content["execution_count"]
                 if im["msg_type"] == "execute_result" or im["msg_type"] == "display_data" or im["msg_type"] == "stream":
-                    if im["msg_type"] == "display_data" and content["data"] and content["data"]["image/png"]:
-                        img = Image.open(io.BytesIO(base64.b64decode(content["data"]["image/png"])))
-                        content["metadata"]["width"] = img.width
-                        content["metadata"]["height"] = img.height
-                        content["metadata"]["channels"] = 3
-                        content["data"]["image/raw"] = base64.b64encode(np.array(img)).decode('ascii')
-                    content["type"] = im["msg_type"]
+                    content["output_type"] = im["msg_type"]
                     res["outputs"].append(content)
                 elif im["msg_type"] == "error":
                     res = { "error": content["evalue"], **content }
