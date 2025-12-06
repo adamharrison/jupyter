@@ -1004,8 +1004,6 @@ core.add_thread(function()
       end
     })
 
-    command.perform("jupyter:new-notebook", core.active_window().root_view)
-    command.perform("jupyter:add-markdown-block", core.active_window().root_view, { text = "# Heading 1\n\nTest\n\n$$\n\\dot{x}\n$$" })
   end)
 
   keymap.add {
