@@ -10,11 +10,7 @@ Requires the new canvas API in Lite XL 3.0.
 
 ### TODO
 
-1. Create a floating toolbar.
-2. Dump compressed images instead of uncompressed from stdout.
-3. Render markdown
-4. Optimize logic and actually put the `draw` stuff in the right place.
-5. Decode base64 better.
+1. Allow for inline formulas, as opposed to only multi-line formulas in Markdown cells.
 
 ### Preview
 
