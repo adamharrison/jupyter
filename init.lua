@@ -13,16 +13,24 @@ local config = require "core.config"
 local common = require "core.common"
 local keymap = require "core.keymap"
 local ime = require "core.ime"
+local litemark = require "plugins.litemark"
+local ToolbarView = require "plugins.toolbarview"
 local json = require "libraries.json"
 local image = require "libraries.image"
+
+
+-- litemark extensions for jupyter
 
 local Jupyter = {}
 
 local JupyterView = View:extend()
+function JupyterView:__tostring() return "JupyterView" end
 
 Jupyter.view = JupyterView
 
 local Block = DocView:extend()
+function Block:__tostring() return "Block" end
+
 function Block:draw_scrollbar() return end
 function Block:get_scrollable_size() return self.size.y end
 
@@ -39,8 +47,9 @@ function SyntaxDoc:save(...)
 end
 
 config.plugins.jupyter = common.merge({
-  debug = true,
-  python = { "python3" },
+  debug = false,
+  -- should be python, due to, as you guessed it, windows.
+  python = { "python" },
   kernel_timeout = 5,
   matplotlib_inline = true,
   kernel_path = USERDIR .. PATHSEP .. "plugins" .. PATHSEP ..  "jupyter" .. PATHSEP .. "kernel.py",
@@ -70,7 +79,68 @@ function Block:get_height()
 end
 
 local OutputView = Block:extend()
-local MarkdownBlock = Block:extend()
+local InputBlock = Block:extend()
+
+local BlockQuickMenu = ToolbarView:extend()
+function BlockQuickMenu:new()
+	BlockQuickMenu.super.new(self)
+  self.toolbar_font = style.icon_big_font:copy(16)
+  self.toolbar_commands = {}
+end
+function BlockQuickMenu:draw_background() 
+	BlockQuickMenu.super.draw_background(self, { common.color "#ffffff70" })
+end
+
+function InputBlock:new(...)
+	InputBlock.super.new(self,  ...)
+	self.quick_menu = BlockQuickMenu()
+	self.quick_menu.input_view = self
+end
+
+
+function InputBlock:draw()
+	InputBlock.super.draw(self)
+	self.quick_menu:draw()
+end
+
+function InputBlock:update()
+	InputBlock.super.update(self)
+	local w = self.quick_menu:get_min_width()
+	self.quick_menu.position.x = self.position.x + self.size.x - w
+	self.quick_menu.position.y = self.position.y - style.padding.y
+	self.quick_menu.size.y = self.quick_menu.toolbar_font:get_height() + style.padding.y * 2
+	self.quick_menu.size.x = w
+	self.quick_menu:update()
+	if self.hovering_quick_menu then
+		core.request_cursor("arrow")
+	end
+end
+
+function InputBlock:on_mouse_moved(x, y, ...)
+	if x >= self.quick_menu.position.x and x < self.quick_menu.position.x + self.quick_menu.size.x and y >= self.quick_menu.position.y and y < self.quick_menu.position.y + self.quick_menu.size.y then
+		self.hovering_quick_menu = self.quick_menu
+		return self.quick_menu:on_mouse_moved(x, y, ...)
+	else
+		self.hovering_quick_menu = nil
+	end
+	return InputBlock.super.on_mouse_moved(self, x, y, ...)
+end
+
+function InputBlock:on_mouse_pressed(button, x, y, ...)
+	if x >= self.quick_menu.position.x and x < self.quick_menu.position.x + self.quick_menu.size.x and y >= self.quick_menu.position.y and y < self.quick_menu.position.y + self.quick_menu.size.y then
+		return self.quick_menu:on_mouse_pressed(button, x, y, ...)
+	end
+	return InputBlock.super.on_mouse_pressed(self, button, x, y, ...)
+end
+
+function InputBlock:on_mouse_released(button, x, y, ...)
+	if x >= self.quick_menu.position.x and x < self.quick_menu.position.x + self.quick_menu.size.x and y >= self.quick_menu.position.y and y < self.quick_menu.position.y + self.quick_menu.size.y then
+		return self.quick_menu:on_mouse_released(button, x, y, ...)
+	end
+	return InputBlock.super.on_mouse_released(self, button, x, y, ...)
+end
+
+local MarkdownBlock = InputBlock:extend()
 
 function OutputView:new(jupyter, doc)
   OutputView.super.new(self, doc or Doc())
@@ -133,7 +203,8 @@ function OutputView:tokenize(line)
 	return tokens
 end
 
-local CodeBlock = Block:extend()
+local CodeBlock = InputBlock:extend()
+function CodeBlock:__tostring() return "CodeBlock" end
 
 function CodeBlock:new(text)
   CodeBlock.super.new(self, SyntaxDoc(self, ".py"))
@@ -143,6 +214,11 @@ function CodeBlock:new(text)
   self.execution_count = nil
   self.doc:reset_syntax()
   self.id = string.format("%08x", math.random(0, 2 ^ 32))
+  self.quick_menu.toolbar_commands = {
+		{symbol = "p", command = "jupyter:run-block"},
+    {symbol = "f", command = "jupyter:toggle-block-type"},
+    {symbol = "x", command = "jupyter:remove-block"}
+  }
 end
 
 -- function Block:get_virtual_line_offset(...)
@@ -161,6 +237,7 @@ end
 function CodeBlock:run()
   self.jupyter:run(self)
 end
+
 
 local base64 = {}
 
@@ -272,6 +349,21 @@ function base64.encode( str, encoder, usecaching )
 	return concat( t )
 end
 
+litemark.layout.draw_ops["jupyter-formula"] = function(ctx, block)
+	ctx.y = ctx.y + litemark.layout.L.RULE_GAP_TOP
+
+  table.insert(ctx.output, {
+    type  = litemark.layout.DRAW_MODE.CANVAS,
+    x     = litemark.layout.L.HEADER_MARGIN_LEFT,
+    y     = ctx.y,
+    w     = block.size.x,
+    h     = block.size.y,
+    canvas = block.canvas
+  })
+  ctx.y = ctx.y + block.size.y
+end
+
+function MarkdownBlock:__tostring() return "MarkdownBlock" end
 function MarkdownBlock:new(text)
   MarkdownBlock.super.new(self, SyntaxDoc(self, ".md"))
   if text then
@@ -279,9 +371,88 @@ function MarkdownBlock:new(text)
   end
   self.doc:reset_syntax()
   self.id = string.format("%08x", math.random(0, 2 ^ 32))
+  self.read_view = litemark.NoteReadView(self.doc, "markdown")
+  self.read_view.block_rules = common.merge(litemark.parser.default_block_rules, {})
+  self.math_image_cache = {}
+  self.quick_menu.toolbar_commands = {
+    {symbol = "f", command = "jupyter:toggle-block-type"},
+    {symbol = "x", command = "jupyter:remove-block"}
+  }
+  table.insert(self.read_view.block_rules, 1, { "^%$%$", function(state, line, lang, c2, c3, line_idx)
+		state.in_fence = "%$%$"
+		table.insert(state.blocks, { 
+			type  = "jupyter-formula", 
+			lines = {}, 
+			arg   = nil,
+			close = function(blk)
+				-- parse formula here, for now, place a blank canvas
+				local formula = table.concat(blk.lines, "\n"):gsub("\n", "\\n")
+				local codeblock = string.format([[
+import matplotlib.pyplot as lxlplt
+from IPython.display import Math as lxlmath, Image as lxlimage
+from io import BytesIO as lxlbytesio
+
+lxllatex = lxlmath(r"""%s""").data
+lxlfig = lxlplt.figure(figsize=(0.01,0.01))
+lxlfig.text(0, 0, f"${lxllatex}$")
+lxlbuf = lxlbytesio()
+lxlfig.savefig(lxlbuf, format="png", bbox_inches="tight", pad_inches=0.1, dpi=200)
+lxlplt.close(lxlfig)
+lxlbuf.seek(0)
+lxlimage(data=lxlbuf.getvalue())
+]], formula)
+				if self.math_image_cache[formula] then
+					local i = self.math_image_cache[formula]
+					blk.canvas = canvas.new(i.width, i.height)
+					blk.size = { x = i.width, y = i.height }
+					blk.canvas:set_pixels(i:save(), 0, 0, i.width, i.height)
+				else
+					self.jupyter:queue(function()
+						local frame = self.jupyter:execute(codeblock)
+						if frame and frame.outputs then
+							for _, output in ipairs(frame.outputs) do
+								if output.data and output.data["image/png"] then
+									local i = image.new(base64.decode(output.data["image/png"]))
+									self.math_image_cache[formula] = i
+									blk.canvas = canvas.new(i.width, i.height)
+									blk.size = { x = i.width, y = i.height }
+									blk.canvas:set_pixels(i:save(), 0, 0, i.width, i.height)
+									self.read_view:update_layout(true)
+									break
+								end
+							end
+						end
+					end)
+					-- placeholder canvas
+					blk.size = { x = 60, y = 60 }
+					blk.canvas = canvas.new(blk.size.x, blk.size.y)
+				end
+			end
+		})
+		return true
+  end  })
 end
 function MarkdownBlock:get_gutter_width() return style.padding.x * 2 end
 function MarkdownBlock:draw_line_gutter() end
+function MarkdownBlock:update()
+  MarkdownBlock.super.update(self)
+	self.read_view.position.x = self.position.x
+	self.read_view.position.y = self.position.y
+	self.read_view.size.x = self.size.x
+	self.read_view.size.y = self.size.y
+end
+
+function MarkdownBlock:get_height()
+	return math.max(self.read_view:get_scrollable_size(), MarkdownBlock.super.get_height(self))
+end
+
+function MarkdownBlock:draw()
+	if self.root_view.active_view == self or self.root_view.active_view == self.quick_menu then
+		MarkdownBlock.super.draw(self)
+	else
+		self.read_view:draw()
+	end
+end
 
 local Figure = View:extend()
 
@@ -384,7 +555,7 @@ end
 
 local core_open_doc = core.open_doc
 function core.open_doc(abs_path, ...)
-	if abs_path:find("%.ipynb$") then
+	if abs_path and abs_path:find("%.ipynb$") then
 		local jv = JupyterView()
 		jv:load(abs_path)
 		return jv
@@ -415,7 +586,7 @@ function CodeBlock:setOutputs(outputs)
 			end
 			self.output_blocks[#self.output_blocks].doc:insert(math.huge, math.huge, text)
 			self.output_blocks[#self.output_blocks].frame = output
-		elseif output.output_type == "display_data" and output.data["image/png"] then
+		elseif (output.output_type == "display_data" or output.output_type == "execute_result") and output.data["image/png"] then
 			table.insert(self.output_blocks, Figure(self, image.new(base64.decode(output.data["image/png"]))))
 			self.output_blocks[#self.output_blocks].frame = output
 		elseif output.output_type == "execute_result" and output.data["text/plain"] then
@@ -551,6 +722,7 @@ function JupyterView:add_block(block, index)
 end
 
 function JupyterView:remove_block(block)
+  core.redraw = true
   for i, sblock in ipairs(self.blocks) do
     if block == sblock then
       table.remove(self.blocks, i)
@@ -560,7 +732,6 @@ function JupyterView:remove_block(block)
       return i
     end
   end
-  core.redraw = true
 end
 
 function JupyterView:set_active_view(view)
@@ -699,7 +870,7 @@ function JupyterView:on_mouse_moved(x, y)
   return JupyterView.super.on_mouse_moved(self, x, y)
 end
 
-local function pred(view)
+local function jupyter_pred(view)
   if view == JupyterView then
     return function(rv, options)
       local jupyter_view = rv.active_view:is(JupyterView) and rv.active_view or rv.active_view.jupyter
@@ -707,6 +878,12 @@ local function pred(view)
     end
   end
   return view
+end
+
+local function block_pred(root_view, options)
+	local block = root_view.active_view
+	block = block and ((block.input_view or block.hovering_block or block))
+	return block and block:extends(options and options.extends or Block), block
 end
 
 
@@ -750,7 +927,7 @@ core.add_thread(function()
       end
     })
 
-    command.add(pred(JupyterView), {
+    command.add(jupyter_pred(JupyterView), {
       ["jupyter:add-code-block"] = function(jv, options)
         local block = jv:add_block(CodeBlock(options.text))
         jv:set_active_view(block)
@@ -789,27 +966,36 @@ core.add_thread(function()
 			end
 		})
 
-    command.add(MarkdownBlock, {
-      ["jupyter:switch-to-code-block"] = function(block)
-        block.jupyter:add_block(
-          CodeBlock(block.doc:get_text(1, 1, math.huge, math.huge)),
-          block.jupyter:remove_block(block)
-        )
+		local toggle_block_switch = function(block)
+			if block:is(CodeBlock) then
+				block.jupyter:add_block(
+						MarkdownBlock(block.doc:get_text(1, 1, math.huge, math.huge)),
+						block.jupyter:remove_block(block)
+				)
+			else
+				block.jupyter:add_block(
+					CodeBlock(block.doc:get_text(1, 1, math.huge, math.huge)),
+					block.jupyter:remove_block(block)
+				)
+			end
+		end
+
+		command.add(block_pred, {
+			["jupyter:toggle-block-type"] = function(block)
+        toggle_block_switch(block)
       end
-    })
-    command.add(CodeBlock, {
-      ["jupyter:switch-to-markdown-block"] = function(block)
-        block.jupyter:add_block(
-          MarkdownBlock(block.doc:get_text(1, 1, math.huge, math.huge)),
-          block.jupyter:remove_block(block)
-        )
-      end,
-      ["jupyter:run-block"] = function(block)
+		})
+    command.add(MarkdownBlock, { ["jupyter:switch-to-code-block"] = toggle_block_switch })
+    command.add(function (rv)
+			return block_pred(rv, { extends = CodeBlock })
+		end, { 
+			["jupyter:switch-to-markdown-block"] = toggle_block_switch, 
+			["jupyter:run-block"] = function(block)
         block.jupyter:queue(function() block:run() end)
       end
     })
 
-    command.add(Block, {
+    command.add(block_pred, {
       ["jupyter:deselect"] = function(block)
         block.jupyter:set_active_view(nil)
       end,
@@ -817,6 +1003,9 @@ core.add_thread(function()
         block.jupyter:remove_block(block)
       end
     })
+
+    command.perform("jupyter:new-notebook", core.active_window().root_view)
+    command.perform("jupyter:add-markdown-block", core.active_window().root_view, { text = "# Heading 1\n\nTest\n\n$$\n\\dot{x}\n$$" })
   end)
 
   keymap.add {

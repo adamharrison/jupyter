@@ -20,14 +20,15 @@ try:
             im = None
             while not im or (im["msg_type"] != "status" or im["content"]["execution_state"] != "idle"):
                 im = client.get_iopub_msg()
-                content = im["content"]
-                if content.get("execution_count"):
-                    res["execution_count"] = content["execution_count"]
-                if im["msg_type"] == "execute_result" or im["msg_type"] == "display_data" or im["msg_type"] == "stream":
-                    content["output_type"] = im["msg_type"]
-                    res["outputs"].append(content)
-                elif im["msg_type"] == "error":
-                    res = { "error": content["evalue"], **content }
+                if not res.get("error"):
+                    content = im["content"]
+                    if content.get("execution_count"):
+                        res["execution_count"] = content["execution_count"]
+                    if im["msg_type"] == "execute_result" or im["msg_type"] == "display_data" or im["msg_type"] == "stream":
+                        content["output_type"] = im["msg_type"]
+                        res["outputs"].append(content)
+                    elif im["msg_type"] == "error":
+                        res = { "error": content["evalue"], **content }
         except Exception as e:
             res = {"traceback": traceback.format_stack(), "error": str(e) }
         print(json.dumps(res))
